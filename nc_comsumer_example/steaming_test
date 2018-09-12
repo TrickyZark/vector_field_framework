@@ -1,0 +1,616 @@
+package nc_comsumer_example
+
+/*
+import org.apache.hadoop.hbase.client.HBaseAdmin
+import org.apache.hadoop.hbase.mapreduce.TableInputFormat
+import org.apache.spark._
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable
+import org.apache.hadoop.hbase.mapreduce.TableOutputFormat
+import org.apache.hadoop.mapred.JobConf
+import org.apache.hadoop.io._*/
+
+import org.apache.hadoop.hbase.client.{Connection, ConnectionFactory, HTable, Put}
+import org.apache.hadoop.hbase.{HBaseConfiguration, HTableDescriptor, TableName}
+import org.apache.hadoop.hbase.util.Bytes
+import java.io.{ByteArrayInputStream, DataInputStream, IOException}
+import java.util.Properties
+import java.util.concurrent.Future
+
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable
+import org.apache.hadoop.hbase.mapred.TableOutputFormat
+import org.apache.hadoop.mapred.JobConf
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord, RecordMetadata}
+import org.apache.kafka.common.serialization.{ByteArrayDeserializer, StringDeserializer}
+import org.apache.log4j.{Level, Logger}
+import org.apache.spark.{HashPartitioner, SparkConf}
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.streaming.{Duration, Seconds, StreamingContext, Time}
+import org.apache.spark.streaming.kafka010.ConsumerStrategies.Subscribe
+import org.apache.spark.streaming.kafka010.LocationStrategies.PreferConsistent
+import org.apache.spark.streaming.kafka010._
+import test.TestHBase2.KafkaSink
+
+import scala.collection.mutable.ArrayBuffer
+
+
+object TestHBase2 {
+  Logger.getLogger("org").setLevel(Level.WARN)
+
+  def main(args: Array[String]): Unit = {
+
+    val sparkConf = new SparkConf().setAppName("HBaseTest")
+
+    //val sc = new StreamingContext(sparkConf,Duration.apply(3000))
+    val sc = new StreamingContext(sparkConf, Seconds(3))
+  //  sc.checkpoint("hdfs://192.168.1.200:9000/data/input")
+    val kafkaParams = Map[String, Object](
+      "bootstrap.servers" -> "192.168.1.200:9092,192.168.1.201:9092,192.168.1.202:9092",
+      "key.deserializer" -> classOf[StringDeserializer],
+      "value.deserializer" -> classOf[ByteArrayDeserializer],
+      "group.id" -> "use_a_separate_group_id_for_each_stream",
+      "auto.offset.reset" -> "latest",
+      "enable.auto.commit" -> (false: java.lang.Boolean)
+    )
+    val topics = Array("photo")
+    val stream = KafkaUtils.createDirectStream[String, Array[Byte]](
+      sc,
+      PreferConsistent,
+      Subscribe[String, Array[Byte]](topics, kafkaParams)
+    )
+
+    val kafkaProducer: Broadcast[KafkaSink[String, String]] = {
+      val kafkaProducerConfig = {
+        val p = new Properties()
+        p.setProperty("bootstrap.servers", "192.168.1.200:9092,192.168.1.201:9092,192.168.1.202:9092")
+        p.setProperty("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+        p.setProperty("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+        p
+      }
+      //log.warn("kafka producer init done!")
+      sc.sparkContext.broadcast(KafkaSink[String, String](kafkaProducerConfig))
+    }
+    val HbaseProducer: Broadcast[HbaseSink] = {
+      /*val hbaseConf = HBaseConfiguration.create()
+      hbaseConf.set("hbase.zookeeper.quorum", "192.168.1.200,192.168.1.201,192.168.1.202")
+      hbaseConf.set("hbase.zookeeper.property.clientPort", "2181")
+      hbaseConf.set("hbase.defaults.for.version.skip", "true")*/
+        val hbaseConf = {
+        val p = new Properties()
+        p.setProperty("hbase.zookeeper.quorum", "192.168.1.200,192.168.1.201,192.168.1.202")
+        p.setProperty("hbase.zookeeper.property.clientPort", "2181")
+        p.setProperty("hbase.defaults.for.version.skip", "true")
+        p
+      }
+
+      sc.sparkContext.broadcast(HbaseSink(hbaseConf))
+    }
+
+
+
+
+
+    stream
+      .map(
+        r => {
+          // var put = new Put(Bytes.toBytes(r.key()))
+          //   put.addColumn(Bytes.toBytes("1"), Bytes.toBytes("1"), r.value())
+          // (new ImmutableBytesWritable, put)
+          //  put
+      /*    var buf=new ArrayBuffer[Byte]()
+          val width=Bytes.toInt(r.value().slice(32,36))
+          val height=Bytes.toInt(r.value().slice(36,40))/2
+          buf++=r.value().slice(0,40)
+          for(i<-0 until height)
+          {
+              buf++=r.value().slice((height-i-1)*width+40,(height-i)*width+40)
+          }
+
+          (r.key(), buf.toArray)*/
+          (r.key(),r.value())
+        }
+      )
+      .foreachRDD(
+        rdd => {
+          rdd.foreach(partition => {
+            HbaseProducer.value.send(args(0), Bytes.toBytes(partition._1), partition._2)
+            kafkaProducer.value.send("result",partition._1 )
+            /*   try{
+                 val table = conn.getTable(TableName.valueOf(args(0)))
+                 import scala.collection.JavaConversions._
+                 val arr=seqAsJavaList(partition.toSeq)
+
+                 table.put(arr)
+                 val next=arr.iterator()
+                 while (next.hasNext)
+                 {
+                   val  rock=new String(next.next().getRow,"UTF-8")
+                   kafkaProducer.value.send("result", value = rock)
+                 }
+               }
+                finally {
+                  conn.close()
+                }*/
+
+          }
+          )
+        }
+
+      )
+
+
+    /*      val tableName = "PageViewStream"
+          val hbaseConf = HBaseConfiguration.create()
+          hbaseConf.set("hbase.zookeeper.quorum", "192.168.1.200,192.168.1.201,192.168.1.202")
+          hbaseConf.set("hbase.zookeeper.property.clientPort", "2181")
+          hbaseConf.set("hbase.defaults.for.version.skip", "true")
+          //用户ID
+          val uid = record.get._1
+          //点击次数
+          val click = record.get._2
+          //组装数据
+          val put = new Put(Bytes.toBytes(uid))
+          put.addColumn("Stat".getBytes, "ClickStat".getBytes, click)
+          val StatTable = new HTable(hbaseConf, TableName.valueOf(tableName))
+          StatTable.setAutoFlush(false, false)
+          //写入数据缓存
+          StatTable.setWriteBufferSize(3*1024*1024)
+          StatTable.put(put)
+          //提交
+          StatTable.flushCommits()*/
+
+
+    //var aaa=sc.sparkContext.longAccumulator("11")//图块总数计数
+    /*  var initialRDD=sc.sparkContext.emptyRDD[(Int,Array[Float])]//存图
+
+    val updateFunc = (values: Seq[Array[Float]], state: Option[Array[Float]]) => {
+    var currentCount=new Array[Float](1)
+    if(values.toArray[Array[Float]].length>0)
+     currentCount = values.toArray[Array[Float]].apply(0)
+    else
+      currentCount=state.getOrElse(null)
+    Some(currentCount)
+    }
+    val newUpdateFunc=(iterator: Iterator[(Int, Seq[Array[Float]], Option[Array[Float]])])=>
+    {
+      iterator.flatMap(t => updateFunc(t._2, t._3).map(s => (t._1, s)))
+    }
+
+    var paralized_photo= stream
+    .map(
+    r=> {
+    //  aaa.add(1)
+     (r.key().toInt, signed4BytesToFloat(r.value()))
+    }
+    ).updateStateByKey(newUpdateFunc,
+    new HashPartitioner(sc.sparkContext.defaultParallelism), true, initialRDD)
+
+
+    paralized_photo.count().print()
+    val flag=paralized_photo.count().flatMap(
+    r=>
+    {
+    val x=r.toInt
+    if(r%4==0)
+    Array((x/4*10,true),(x/4*10+1,true),(x/4*10+2,true),(x/4*10+3,true))
+    else
+     Array((x/4*10,false),(x/4*10+1,false),(x/4*10+2,false),(x/4*10+3,false))
+    }
+    )
+    val filter_photo=paralized_photo.join(flag).filter(x=>x._2._2==true).map(re=>(re._1,re._2._1))
+
+
+
+    var first_particles= filter_photo
+    .flatMap(
+        record=>
+          {
+              // if()
+              var fir = new particles(new vc_field(record._2, 297, 197), 1250, 2, 2, record._1).get_trail_begin()
+               var str=""
+                for (a <- 0 until fir.length) {
+                 // str++=Bytes.toBytes(fir(a)._1)
+                //  str++=Bytes.toBytes(fir(a)._2(0))
+                //  str++=Bytes.toBytes(fir(a)._2(1))
+                    str+=fir(a)._1+","+fir(a)._2(0)+","+fir(a)._2(1)+" "
+                }
+                kafkaProducer.value.send("result", str)
+           //   kafkaProducer.value.send("result", fir.length.toString + "," + record._1.toString + ")")
+              fir
+          }
+
+    )*/
+
+
+    /*    for(n<-0 to 50){
+       var newstream=filter_photo.cogroup(first_particles)
+       first_particles=newstream.flatMap(
+         rec=>
+         {
+           var fir = new particles(new vc_field(rec._2._1.head, 297, 197), 1250, 2, 2, rec._1).get_trail(rec._2._2.toArray[Array[Float]])
+          // var str=new ArrayBuffer[Byte]()
+           var str=""
+           for (a <- 0 until fir.length) {
+             str+=fir(a)._1+","+fir(a)._2(0)+","+fir(a)._2(1)+" "
+           }
+           kafkaProducer.value.send("result", str)
+        //   kafkaProducer.value.send("result", fir.length.toString+","+rec._1.toString+"))")
+           fir
+         }
+       )
+
+      }*/
+    // first_particles.count.print()
+
+
+    //join(first_particles.map(rd=>(rd._1,Bytes.toBytes(rd._2))))
+
+    // sc.checkpoint("D://tmp")
+
+    //first_particles
+    // middle_data.foreachRDD(r=>r.foreach(println))
+    // Run the streaming job
+    sc.start()
+    sc.awaitTermination()
+    /*  val tablename = "table1"
+    val conf = HBaseConfiguration.create()
+    //设置zooKeeper集群地址，也可以通过将hbase-site.xml导入classpath，但是建议在程序里这样设置
+    conf.set("hbase.zookeeper.quorum","192.168.1.200")
+    //设置zookeeper连接端口，默认2181
+    conf.set("hbase.zookeeper.property.clientPort", "2181")
+    conf.set(TableInputFormat.INPUT_TABLE, tablename)
+
+    // 如果表不存在则创建表
+    val admin = new HBaseAdmin(conf)
+    if (!admin.isTableAvailable(tablename)) {
+    val tableDesc = new HTableDescriptor(TableName.valueOf(tablename))
+    admin.createTable(tableDesc)
+    }
+
+    //读取数据并转化成rdd
+    val hBaseRDD = sc.newAPIHadoopRDD(conf, classOf[TableInputFormat],
+    classOf[org.apache.hadoop.hbase.io.ImmutableBytesWritable],
+    classOf[org.apache.hadoop.hbase.client.Result])
+
+    val count = hBaseRDD.count()
+    println(count)
+    hBaseRDD.foreach{case (_,result) =>{
+    //获取行键
+    val key = Bytes.toString(result.getRow)
+    //通过列族和列名获取列
+    //val name = Bytes.toString(result.getValue("group1".getBytes,"val".getBytes))
+    println("Row key:"+key)
+    /*if(key=="row3") {
+      val value = Bytes.toString(result.getValue("group1".getBytes, "val".getBytes)).split(" ")
+      val value2 = new Array[Float](value.length)
+
+      for (i <- 0 to value.length-1)
+        value2(i) = value(i).toFloat
+    }
+    else if(key=="row4")
+    {*/
+      val value = result.getValue("group1".getBytes, "val".getBytes)
+      val value2 = new Array[Float](value.length/4)
+      for(j <- 0 until value.length/4)
+        value2(j) = Bytes.toFloat(Bytes.copy(value,4*j,4))
+
+    }}*/
+
+
+    // sc.stop()
+    //admin.close()
+
+  }
+
+  def signed4BytesToFloat(buf: Array[Byte]): Array[Float] = {
+    var result = new Array[Float](buf.length / 4)
+
+    for (i <- 0 until buf.length / 4) {
+      // var firstByte = 0x000000FF & buf(i*4)
+      // var secondByte  = 0x000000FF & buf(i*4+1)
+      //  var thirdByte  = 0x000000FF & buf(i*4+2)
+      // var fourthByte  = 0x000000FF & buf(i*4+3)
+      // result(i)=((firstByte << 24 | secondByte << 16 | thirdByte << 8 | fourthByte) & 0xFFFFFFFFL).toFloat
+
+      var dis = new DataInputStream(new ByteArrayInputStream(buf.slice(i * 4, i * 4 + 4)))
+      result(i) = dis.readFloat()
+    }
+    result
+  }
+
+  class KafkaSink[K, V](createProducer: () => KafkaProducer[K, V]) extends Serializable {
+    /* This is the key idea that allows us to work around running into
+     NotSerializableExceptions. */
+    lazy val producer = createProducer()
+
+    def send(topic: String, key: K, value: V): Future[RecordMetadata] =
+      producer.send(new ProducerRecord[K, V](topic, key, value))
+
+    def send(topic: String, value: V): Future[RecordMetadata] =
+      producer.send(new ProducerRecord[K, V](topic, value))
+  }
+
+  object KafkaSink {
+
+    import scala.collection.JavaConversions._
+
+    def apply[K, V](config: Map[String, Object]): KafkaSink[K, V] = {
+      val createProducerFunc = () => {
+        val producer = new KafkaProducer[K, V](config)
+        sys.addShutdownHook {
+          // Ensure that, on executor JVM shutdown, the Kafka producer sends
+          // any buffered messages to Kafka before shutting down.
+          producer.close()
+        }
+        producer
+      }
+      new KafkaSink(createProducerFunc)
+    }
+
+    def apply[K, V](config: java.util.Properties): KafkaSink[K, V] = apply(config.toMap)
+  }
+
+  class HbaseSink(createProducer: () => Connection) extends Serializable {
+    /* This is the key idea that allows us to work around running into
+     NotSerializableExceptions. */
+    lazy val producer = createProducer()
+    def send(table: String, key: Array[Byte], value: Array[Byte]) = {
+      val tableName = producer.getTable(TableName.valueOf(table))
+      val put = new Put(key)
+      put.addColumn("1".getBytes, "1".getBytes, value)
+      tableName.put(put)
+    }
+  }
+
+  object HbaseSink {
+   import scala.collection.JavaConversions._
+    def apply(config: java.util.Properties): HbaseSink = {
+      val createProducerFunc = () => {
+        val aaa=config.toMap
+        val hbaseConf = HBaseConfiguration.create()
+        val next=aaa.iterator
+        while(next.hasNext)
+          {
+            val confi=next.next()
+            hbaseConf.set(confi._1,confi._2)
+          }
+        val sender = ConnectionFactory.createConnection(hbaseConf)
+        sys.addShutdownHook {
+          sender.close()
+          while (!sender.isClosed)
+            sender.close()
+        }
+        sender
+      }
+      new HbaseSink(createProducerFunc)
+    }
+
+  }
+
+  //token类
+  class tokenpool() {
+    var pool_buffer = new ArrayBuffer[token]()
+
+    def add_token(t: token): Unit = {
+      pool_buffer += t
+    }
+
+    def searh_token(num: Int): Array[token] = {
+      // val pool=pool_buffer
+      var re = new ArrayBuffer[token]()
+      for (i <- 0 until pool_buffer.length) {
+        if (pool_buffer(i).reciever == num)
+          re += pool_buffer(i)
+      }
+      re.toArray
+    }
+
+    def delete_token(arr: Array[token]): Unit = {
+      pool_buffer --= arr
+    }
+
+  }
+
+  class token(rec: Int, position: particle) {
+    var reciever = rec
+    var pos_x = position.x
+    var pos_y = position.y
+    val left_age = position.age
+  }
+
+  //矢量生成算法
+  class vector(tx: Float, ty: Float) {
+    var x: Float = tx
+    var y: Float = ty
+  }
+
+  class particle(tx: Float, ty: Float, a: Float) {
+    var x: Float = tx
+    var y: Float = ty
+    var age: Float = a
+
+    def Is_Alive(): Boolean = {
+      if (age >= 0)
+        return true
+      else
+        return false
+    }
+  }
+
+  class vc_field(arr: Array[Float], twidth: Int, theight: Int) {
+    val width: Int = twidth
+    val height: Int = theight
+
+    val vc_field_val: Array[Array[vector]] = {
+      var field = new Array[Array[vector]](width)
+      for (i <- 0 until width) {
+        var column = new Array[vector](height)
+        for (j <- 0 until height) {
+          column(j) = new vector(arr(i * height + j * 2), arr(i * height + j * 2 + 1))
+        }
+        field(i) = column
+      }
+      field
+    }
+
+    def get_val(pos: Array[Float]): vector = {
+      vc_field_val(pos(0).toInt)(pos(1).toInt)
+    }
+  }
+
+  class particles(field: vc_field, num: Int, split_x: Int, split_y: Int, key: Int) {
+    var particle_arr: Array[particle] = new Array[particle](num)
+    var image_key = key
+
+    def get_trail(seeds: Array[Array[Float]]): Array[(Int, Array[Float])] = {
+      var pool = ArrayBuffer[(Int, Array[Float])]()
+      for (i <- 0 until seeds.length) {
+        if (seeds(i)(2) <= 0) {
+          pool += Tuple2(key, Array(util.Random.nextFloat() * field.width, util.Random.nextFloat() * field.height, 1 + util.Random.nextFloat() * 40))
+        }
+        else {
+          val vc = field.get_val(seeds(i))
+          val next_x = seeds(i)(0) + vc.x * 0.25.toFloat
+          val next_y = seeds(i)(1) + vc.y * 0.25.toFloat
+
+          /* if(key==0)//左上
+              {
+
+              }
+            else if(key==(split_x-1))//右上
+              {
+
+              }
+            else  if(key==split_x*(split_y-1))//左下
+            {
+
+            }
+            else if(key==(split_x*split_y-1))//右下
+            {
+
+            }*/
+          if (next_y <= field.height && next_y >= 0 && next_x <= field.width && next_x >= 0) {
+            pool += Tuple2(key, Array(next_x, next_y, seeds(i)(2) - 1))
+          }
+          else if (next_y > field.height) //下
+          {
+            if (next_x > field.width) //右下
+            {
+              if ((key <= (split_x * split_y - 1) && key >= split_x * (split_y - 1)) || (key % split_x == (split_x - 1))) {
+                pool += Tuple2(util.Random.nextInt(split_x * split_y - 1), Array(util.Random.nextFloat() * field.width, util.Random.nextFloat() * field.height, 1 + util.Random.nextFloat() * 40))
+              }
+              else
+                pool += Tuple2(key + split_x + 1, Array(next_x - field.width, next_y - field.height, seeds(i)(2) - 1))
+            }
+            else if (next_x < 0) //左下
+            {
+              if ((key % split_x == 0) || (key <= (split_x * split_y - 1) && key >= split_x * (split_y - 1))) {
+                pool += Tuple2(util.Random.nextInt(split_x * split_y - 1), Array(util.Random.nextFloat() * field.width, util.Random.nextFloat() * field.height, 1 + util.Random.nextFloat() * 40))
+              }
+              else
+                pool += Tuple2(key + split_x - 1, Array(next_x + field.width, next_y - field.height, seeds(i)(2) - 1))
+            }
+            else //下
+            {
+              if (key <= (split_x * split_y - 1) && key >= split_x * (split_y - 1)) {
+                pool += Tuple2(util.Random.nextInt(split_x * split_y - 1), Array(util.Random.nextFloat() * field.width, util.Random.nextFloat() * field.height, 1 + util.Random.nextFloat() * 40))
+              }
+              else
+                pool += Tuple2(key + split_x, Array(next_x, next_y - field.height, seeds(i)(2) - 1))
+            }
+          }
+          else if (next_y < 0) //上
+          {
+            if (next_x > field.width) //右上
+            {
+              if ((key < split_x) || (key % split_x == (split_x - 1))) {
+                pool += Tuple2(util.Random.nextInt(split_x * split_y - 1), Array(util.Random.nextFloat() * field.width, util.Random.nextFloat() * field.height, 1 + util.Random.nextFloat() * 40))
+              }
+              else
+                pool += Tuple2(key - split_x + 1, Array(next_x - field.width, next_y + field.height, seeds(i)(2) - 1))
+            }
+            else if (next_x < 0) //左上
+            {
+              if ((key < split_x) || (key % split_x == 0)) {
+                pool += Tuple2(util.Random.nextInt(split_x * split_y - 1), Array(util.Random.nextFloat() * field.width, util.Random.nextFloat() * field.height, 1 + util.Random.nextFloat() * 40))
+              }
+              else
+                pool += Tuple2(key - split_x - 1, Array(next_x + field.width, next_y + field.height, seeds(i)(2) - 1))
+            }
+            else //上
+            {
+              if (key < split_x) {
+                pool += Tuple2(util.Random.nextInt(split_x * split_y - 1), Array(util.Random.nextFloat() * field.width, util.Random.nextFloat() * field.height, 1 + util.Random.nextFloat() * 40))
+              }
+              else
+                pool += Tuple2(key - split_x, Array(next_x, next_y + field.height, seeds(i)(2) - 1))
+            }
+          }
+          else {
+            if (next_x > field.width) //右
+            {
+              if (key % split_x == (split_x - 1)) {
+                pool += Tuple2(util.Random.nextInt(split_x * split_y - 1), Array(util.Random.nextFloat() * field.width, util.Random.nextFloat() * field.height, 1 + util.Random.nextFloat() * 40))
+              }
+              else
+                pool += Tuple2(key + 1, Array(next_x - field.width, next_y, seeds(i)(2) - 1))
+            }
+            else if (next_x < 0) //左
+            {
+              if (key % split_x == 0) {
+                pool += Tuple2(util.Random.nextInt(split_x * split_y - 1), Array(util.Random.nextFloat() * field.width, util.Random.nextFloat() * field.height, 1 + util.Random.nextFloat() * 40))
+              }
+              else
+                pool += Tuple2(key - 1, Array(next_x + field.width, next_y, seeds(i)(2) - 1))
+            }
+          }
+
+          /*   if (key < split_x) //上
+              {
+                if (next_y > field.height) {
+                  pool += Tuple2(key + split_x,Array(next_x, next_y - field.height + 1, seeds(i)(2)-1))
+
+                }
+              }
+              else if (key % split_x == 0) //左
+              {
+                if (next_x > field.width) {
+                  pool += Tuple2(key + 1, Array(next_x - field.width, next_y, seeds(i)(2)-1))
+                }
+              }
+              else if (key <= (split_x * split_y - 1) && key >= split_x * (split_y - 1)) //下
+              {
+                if (next_y < 0) {
+                  pool += Tuple2(key - split_x,Array(next_x, next_y + field.height, seeds(i)(2)-1))
+                }
+              }
+              else if (key % split_x == (split_x - 1)) //右
+              {
+                if (next_x < 0) {
+                  pool += Tuple2(key - 1, Array(next_x + field.width, next_y, seeds(i)(2)-1))
+                }
+              }*/
+
+
+        }
+        //   println("(" + i + "," + particle_arr(i).x + "," + particle_arr(i).y + ")")
+      }
+      pool.toArray
+    }
+
+    def get_trail_begin(): Array[(Int, Array[Float])] = {
+      var pool = ArrayBuffer[(Int, Array[Float])]()
+      for (i <- 0 until num) {
+        if (particle_arr(i) == null || !particle_arr(i).Is_Alive()) {
+          particle_arr(i) = new particle((new util.Random).nextInt(field.width), (new util.Random).nextInt(field.height), 1 + (new util.Random).nextInt(40))
+
+        }
+
+        // println("(" + i + "," + particle_arr(i).x + "," + particle_arr(i).y + ")")
+
+        pool += new Tuple2(image_key, Array(particle_arr(i).x, particle_arr(i).y, particle_arr(i).age))
+      }
+      pool.toArray
+    }
+  }
+
+}
