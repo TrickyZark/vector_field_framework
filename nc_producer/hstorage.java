@@ -1,4 +1,4 @@
-package read;
+package nc_producer;
 
 
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
