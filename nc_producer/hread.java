@@ -1,4 +1,4 @@
-package read;
+package nc_producer;
 
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.hadoop.conf.Configuration;
