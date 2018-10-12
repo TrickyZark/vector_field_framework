@@ -1,7 +1,8 @@
 # vector_field_framework
 
 This framework consists of three parts： data producer, parallel computing and services.<br>
-1. data producer<br>
+
+1.data producer<br>
 This part runs on the data source as a data producer, configures the segmentation algorithm according to the data segmentation, and configures the cluster address and the Kafka topic information simultaneously.<br>
 Enviroment:jvm1.8<br>
 
